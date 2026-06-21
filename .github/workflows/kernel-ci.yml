@@ -423,11 +423,10 @@ jobs:
         run: |
           REPORT=selftest-${{ matrix.group }}-report.txt
           INSTALL_DIR="$PWD/kselftest-install"
-          vng --run \
-            --kernel arch/x86/boot/bzImage \
+          vng --run arch/x86/boot/bzImage \
             --memory 4G \
             --cpus $(nproc) \
-            -- bash -c "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
             | tee "$REPORT"
 
           if grep -qE "^not ok" "$REPORT"; then
@@ -656,11 +655,10 @@ jobs:
         run: |
           REPORT=kasan-selftest-${{ matrix.group }}-report.txt
           INSTALL_DIR="$PWD/kselftest-install"
-          vng --run \
-            --kernel arch/x86/boot/bzImage \
+          vng --run arch/x86/boot/bzImage \
             --memory 4G \
             --cpus $(nproc) \
-            -- bash -c "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
             | tee "$REPORT"
 
           if grep -qE "^not ok|KASAN:" "$REPORT"; then
