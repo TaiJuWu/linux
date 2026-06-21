@@ -304,3 +304,141 @@ jobs:
         with:
           name: kunit-report
           path: kunit-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 6a: Build kernel for integration selftests
+  # 合併所有 selftest config，build 一次供後續 matrix job 共用
+  # ───────────────────────────────────────────────────────────────────────────
+  build-integration-kernel:
+    name: Build Integration Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache integration kernel
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: integration-x86_64-${{ github.sha }}
+
+      - name: Merge all selftest configs and build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          make defconfig
+          readarray -t FRAGS < <(find tools/testing/selftests -maxdepth 2 -name config)
+          scripts/kconfig/merge_config.sh -m .config "${FRAGS[@]}"
+          make olddefconfig
+          make -j$(nproc) bzImage modules
+          make INSTALL_MOD_PATH=modules_install modules_install
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 6b: Integration Selftests（QEMU via virtme-ng，分群平行跑）
+  # 排除需要真實硬體的 subsystem（driver、arch-specific、hardware sensor 等）
+  # ───────────────────────────────────────────────────────────────────────────
+  integration-selftests:
+    name: Selftests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    needs: build-integration-kernel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: net
+            targets: net tc-testing vsock wireguard
+          - group: mm
+            targets: mm cgroup memfd membarrier mincore zram
+          - group: fs
+            targets: filesystems mount mount_setattr move_mount_set_group tmpfs splice filelock
+          - group: security
+            targets: landlock seccomp lsm capabilities safesetid lkdtm
+          - group: ipc
+            targets: ipc futex mqueue pipe sync
+          - group: proc
+            targets: proc sysctl prctl rlimits namespaces pid_namespace
+          - group: sched
+            targets: sched sched_ext timers timens rseq
+          - group: syscall
+            targets: signal clone3 exec kcmp pidfd ptrace syscall_user_dispatch fchmodat2 coredump mseal_system_mappings
+          - group: tracing
+            targets: ftrace bpf static_keys user_events uevent ring-buffer
+          - group: misc
+            targets: vDSO cachestat kmod locking verification
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison libelf-dev libssl-dev bc pahole \
+            qemu-system-x86 python3 python3-pip \
+            nftables iptables iproute2 iputils-ping \
+            ethtool socat netcat-openbsd \
+            libcap-dev libmnl-dev \
+            clang llvm
+          pip3 install virtme-ng
+
+      - name: Restore integration kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: integration-x86_64-${{ github.sha }}
+
+      - name: Build selftests
+        run: |
+          make -j$(nproc) -C tools/testing/selftests \
+            TARGETS="${{ matrix.targets }}" \
+            install INSTALL_PATH=$PWD/kselftest-install
+
+      - name: Run selftests in QEMU
+        timeout-minutes: 30
+        run: |
+          REPORT=selftest-${{ matrix.group }}-report.txt
+          vng --run \
+            --memory 4G \
+            --cpus $(nproc) \
+            -- bash -c "
+              cd $(pwd)/kselftest-install
+              ./run_kselftest.sh 2>&1
+            " | tee "$REPORT"
+
+          if grep -qE "^not ok" "$REPORT"; then
+            echo "::error::Selftests failed in group ${{ matrix.group }}"
+            grep "^not ok" "$REPORT"
+            exit 1
+          fi
+          PASSED=$(grep -c "^ok " "$REPORT" || true)
+          echo "Group ${{ matrix.group }}: ${PASSED} tests passed"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ matrix.group }}-report
+          path: selftest-${{ matrix.group }}-report.txt
