@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2024 Meta Platforms, Inc. and affiliates. */
+// TEST 2
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/cacheflush.h>
