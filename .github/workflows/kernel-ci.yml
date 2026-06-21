@@ -336,7 +336,8 @@ jobs:
             arch/x86/boot/bzImage
             scripts/
             modules_install/
-          key: integration-x86_64-${{ github.sha }}
+          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-x86_64-
 
       - name: Merge all selftest configs and build
         if: steps.cache.outputs.cache-hit != 'true'
@@ -408,7 +409,8 @@ jobs:
             arch/x86/boot/bzImage
             scripts/
             modules_install/
-          key: integration-x86_64-${{ github.sha }}
+          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-x86_64-
 
       - name: Build selftests
         run: |
@@ -420,13 +422,13 @@ jobs:
         timeout-minutes: 30
         run: |
           REPORT=selftest-${{ matrix.group }}-report.txt
+          INSTALL_DIR="$PWD/kselftest-install"
           vng --run \
+            --kernel arch/x86/boot/bzImage \
             --memory 4G \
             --cpus $(nproc) \
-            -- bash -c "
-              cd $(pwd)/kselftest-install
-              ./run_kselftest.sh 2>&1
-            " | tee "$REPORT"
+            -- bash -c "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            | tee "$REPORT"
 
           if grep -qE "^not ok" "$REPORT"; then
             echo "::error::Selftests failed in group ${{ matrix.group }}"
@@ -580,7 +582,8 @@ jobs:
             arch/x86/boot/bzImage
             scripts/
             modules_install/
-          key: kasan-x86_64-${{ github.sha }}
+          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-x86_64-
 
       - name: Build kernel with KASAN
         if: steps.cache.outputs.cache-hit != 'true'
@@ -639,7 +642,8 @@ jobs:
             arch/x86/boot/bzImage
             scripts/
             modules_install/
-          key: kasan-x86_64-${{ github.sha }}
+          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-x86_64-
 
       - name: Build selftests
         run: |
@@ -651,13 +655,13 @@ jobs:
         timeout-minutes: 45
         run: |
           REPORT=kasan-selftest-${{ matrix.group }}-report.txt
+          INSTALL_DIR="$PWD/kselftest-install"
           vng --run \
+            --kernel arch/x86/boot/bzImage \
             --memory 4G \
             --cpus $(nproc) \
-            -- bash -c "
-              cd $(pwd)/kselftest-install
-              ./run_kselftest.sh 2>&1
-            " | tee "$REPORT"
+            -- bash -c "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            | tee "$REPORT"
 
           if grep -qE "^not ok|KASAN:" "$REPORT"; then
             echo "::error::KASAN issues or test failures in group ${{ matrix.group }}"
