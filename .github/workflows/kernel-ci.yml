@@ -1,0 +1,306 @@
+name: Kernel CI
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'net/**'
+      - 'fs/**'
+      - 'mm/**'
+      - 'kernel/**'
+      - 'drivers/**'
+      - 'include/**'
+      - 'arch/**'
+      - 'lib/**'
+      - 'crypto/**'
+      - 'security/**'
+      - 'ipc/**'
+      - 'block/**'
+      - 'sound/**'
+      - 'virt/**'
+  pull_request:
+    paths:
+      - 'net/**'
+      - 'fs/**'
+      - 'mm/**'
+      - 'kernel/**'
+      - 'drivers/**'
+      - 'include/**'
+      - 'arch/**'
+      - 'lib/**'
+      - 'crypto/**'
+      - 'security/**'
+      - 'ipc/**'
+      - 'block/**'
+      - 'sound/**'
+      - 'virt/**'
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 1: Checkpatch
+  # ───────────────────────────────────────────────────────────────────────────
+  checkpatch:
+    name: Checkpatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "range=origin/${{ github.base_ref }}...HEAD" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "range=HEAD~1...HEAD" >> $GITHUB_OUTPUT
+          else
+            echo "range=${{ github.event.before }}...${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run checkpatch
+        run: |
+          git diff ${{ steps.range.outputs.range }} \
+            -- '*.c' '*.h' \
+            | ./scripts/checkpatch.pl \
+                --no-tree \
+                --ignore FILE_PATH_CHANGES \
+                --ignore LONG_LINE \
+                - \
+          || true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 2: Build – x86_64
+  # 只編譯有變更的 .c 檔對應的 .o，不 build 整個 kernel
+  # ───────────────────────────────────────────────────────────────────────────
+  build-x86_64:
+    name: Build (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache kernel build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            scripts/
+            .config
+          key: build-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'scripts/Makefile*') }}
+          restore-keys: build-x86_64-
+
+      - name: Configure
+        run: |
+          make defconfig
+          make olddefconfig
+
+      - name: Prepare build system
+        run: make -j$(nproc) modules_prepare
+
+      - name: Build changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping build"
+          else
+            echo "Building: $TARGETS"
+            make -j$(nproc) $TARGETS
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 3: Build – arm64 cross-compile
+  # ───────────────────────────────────────────────────────────────────────────
+  build-arm64:
+    name: Build (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache kernel build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            include/config/
+            include/generated/
+            arch/arm64/include/generated/
+            scripts/
+            .config
+          key: build-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'scripts/Makefile*') }}
+          restore-keys: build-arm64-
+
+      - name: Configure
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: Prepare build system
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            -j$(nproc) modules_prepare
+
+      - name: Build changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping build"
+          else
+            echo "Building: $TARGETS"
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) $TARGETS
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 4: Sparse – 靜態分析（只跑有變更的 .c 檔）
+  # ───────────────────────────────────────────────────────────────────────────
+  sparse:
+    name: Sparse Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            sparse gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Configure
+        run: |
+          make defconfig
+          make olddefconfig
+
+      - name: Prepare build system
+        run: make -j$(nproc) modules_prepare
+
+      - name: Run sparse on changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping sparse"
+          else
+            echo "Running sparse on: $TARGETS"
+            make C=1 CF="-D__CHECK_ENDIAN__" $TARGETS 2>&1 | tee sparse-report.txt
+            if grep -q " error:" sparse-report.txt; then
+              echo "::error::Sparse found errors"
+              grep " error:" sparse-report.txt
+              exit 1
+            fi
+          fi
+
+      - name: Upload sparse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparse-report
+          path: sparse-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 5: KUnit（透過 UML，不需硬體）
+  # ───────────────────────────────────────────────────────────────────────────
+  kunit:
+    name: KUnit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc cpio \
+            python3 python3-yaml
+
+      - name: Run KUnit
+        run: |
+          ./tools/testing/kunit/kunit.py run \
+            --jobs=$(nproc) \
+            --timeout=300 \
+            2>&1 | tee kunit-report.txt
+
+      - name: Parse KUnit results
+        if: always()
+        run: |
+          if grep -q "FAILED" kunit-report.txt; then
+            echo "::error::KUnit tests failed"
+            grep "FAILED" kunit-report.txt
+            exit 1
+          fi
+          PASSED=$(grep -c "ok " kunit-report.txt || true)
+          echo "KUnit: ${PASSED} tests passed"
+
+      - name: Upload KUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kunit-report
+          path: kunit-report.txt
