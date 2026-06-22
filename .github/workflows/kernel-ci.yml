@@ -1,23 +1,6 @@
 name: Kernel CI
 
 on:
-  push:
-    branches: ['**']
-    paths:
-      - 'net/**'
-      - 'fs/**'
-      - 'mm/**'
-      - 'kernel/**'
-      - 'drivers/**'
-      - 'include/**'
-      - 'arch/**'
-      - 'lib/**'
-      - 'crypto/**'
-      - 'security/**'
-      - 'ipc/**'
-      - 'block/**'
-      - 'sound/**'
-      - 'virt/**'
   pull_request:
     paths:
       - 'net/**'
