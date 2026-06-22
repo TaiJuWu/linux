@@ -19,6 +19,7 @@ RUN apt-get update -qq && apt-get install -y \
     libpopt-dev \
     libcap-dev \
     libmnl-dev \
+    liburcu-dev \
     clang llvm \
     # Network tools
     nftables iptables iproute2 iputils-ping \
