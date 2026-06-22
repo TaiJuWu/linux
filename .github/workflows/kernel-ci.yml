@@ -1,0 +1,660 @@
+name: Kernel CI
+
+on:
+  pull_request:
+    paths:
+      - 'net/**'
+      - 'fs/**'
+      - 'mm/**'
+      - 'kernel/**'
+      - 'drivers/**'
+      - 'include/**'
+      - 'arch/**'
+      - 'lib/**'
+      - 'crypto/**'
+      - 'security/**'
+      - 'ipc/**'
+      - 'block/**'
+      - 'sound/**'
+      - 'virt/**'
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 1: Checkpatch
+  # ───────────────────────────────────────────────────────────────────────────
+  checkpatch:
+    name: Checkpatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "range=origin/${{ github.base_ref }}...HEAD" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "range=HEAD~1...HEAD" >> $GITHUB_OUTPUT
+          else
+            echo "range=${{ github.event.before }}...${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run checkpatch
+        run: |
+          git diff ${{ steps.range.outputs.range }} \
+            -- '*.c' '*.h' \
+            | ./scripts/checkpatch.pl \
+                --no-tree \
+                --ignore FILE_PATH_CHANGES \
+                --ignore LONG_LINE \
+                - \
+          || true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 2: Build – x86_64
+  # 只編譯有變更的 .c 檔對應的 .o，不 build 整個 kernel
+  # ───────────────────────────────────────────────────────────────────────────
+  build-x86_64:
+    name: Build (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache kernel build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            scripts/
+            .config
+          key: build-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'scripts/Makefile*') }}
+          restore-keys: build-x86_64-
+
+      - name: Configure
+        run: |
+          make defconfig
+          make olddefconfig
+
+      - name: Prepare build system
+        run: make -j$(nproc) modules_prepare
+
+      - name: Build changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping build"
+          else
+            echo "Building: $TARGETS"
+            make -j$(nproc) $TARGETS
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 3: Build – arm64 cross-compile
+  # ───────────────────────────────────────────────────────────────────────────
+  build-arm64:
+    name: Build (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache kernel build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            include/config/
+            include/generated/
+            arch/arm64/include/generated/
+            scripts/
+            .config
+          key: build-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'scripts/Makefile*') }}
+          restore-keys: build-arm64-
+
+      - name: Configure
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: Prepare build system
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            -j$(nproc) modules_prepare
+
+      - name: Build changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping build"
+          else
+            echo "Building: $TARGETS"
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) $TARGETS
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 4: Sparse – 靜態分析（只跑有變更的 .c 檔）
+  # ───────────────────────────────────────────────────────────────────────────
+  sparse:
+    name: Sparse Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            sparse gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Configure
+        run: |
+          make defconfig
+          make olddefconfig
+
+      - name: Prepare build system
+        run: make -j$(nproc) modules_prepare
+
+      - name: Run sparse on changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          TARGETS=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' \
+            | grep -v '^Documentation/' \
+            | sed 's/\.c$/.o/' \
+            | tr '\n' ' ')
+
+          if [ -z "$TARGETS" ]; then
+            echo "No .c files changed, skipping sparse"
+          else
+            echo "Running sparse on: $TARGETS"
+            make C=1 CF="-D__CHECK_ENDIAN__" $TARGETS 2>&1 | tee sparse-report.txt
+            if grep -q " error:" sparse-report.txt; then
+              echo "::error::Sparse found errors"
+              grep " error:" sparse-report.txt
+              exit 1
+            fi
+          fi
+
+      - name: Upload sparse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparse-report
+          path: sparse-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 5: KUnit（透過 UML，不需硬體）
+  # ───────────────────────────────────────────────────────────────────────────
+  kunit:
+    name: KUnit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc cpio \
+            python3 python3-yaml
+
+      - name: Run KUnit
+        run: |
+          ./tools/testing/kunit/kunit.py run \
+            --jobs=$(nproc) \
+            --timeout=300 \
+            2>&1 | tee kunit-report.txt
+
+      - name: Parse KUnit results
+        if: always()
+        run: |
+          if grep -q "FAILED" kunit-report.txt; then
+            echo "::error::KUnit tests failed"
+            grep "FAILED" kunit-report.txt
+            exit 1
+          fi
+          PASSED=$(grep -c "ok " kunit-report.txt || true)
+          echo "KUnit: ${PASSED} tests passed"
+
+      - name: Upload KUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kunit-report
+          path: kunit-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 6a: Build kernel for integration selftests
+  # 合併所有 selftest config，build 一次供後續 matrix job 共用
+  # ───────────────────────────────────────────────────────────────────────────
+  build-integration-kernel:
+    name: Build Integration Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache integration kernel
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-x86_64-
+
+      - name: Merge all selftest configs and build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          make defconfig
+          readarray -t FRAGS < <(find tools/testing/selftests -maxdepth 2 -name config)
+          scripts/kconfig/merge_config.sh -m .config "${FRAGS[@]}"
+          make olddefconfig
+          make -j$(nproc) bzImage modules
+          make INSTALL_MOD_PATH=modules_install modules_install
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 6b: Integration Selftests（QEMU via virtme-ng，分群平行跑）
+  # 排除需要真實硬體的 subsystem（driver、arch-specific、hardware sensor 等）
+  # ───────────────────────────────────────────────────────────────────────────
+  integration-selftests:
+    name: Selftests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    needs: build-integration-kernel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: net
+            targets: net tc-testing vsock wireguard
+          - group: mm
+            targets: mm cgroup memfd membarrier mincore zram
+          - group: fs
+            targets: filesystems mount mount_setattr move_mount_set_group tmpfs splice filelock
+          - group: security
+            targets: landlock seccomp lsm capabilities safesetid lkdtm
+          - group: ipc
+            targets: ipc futex mqueue pipe sync
+          - group: proc
+            targets: proc sysctl prctl rlimits namespaces pid_namespace
+          - group: sched
+            targets: sched sched_ext timers timens rseq
+          - group: syscall
+            targets: signal clone3 exec kcmp pidfd ptrace syscall_user_dispatch fchmodat2 coredump mseal_system_mappings
+          - group: tracing
+            targets: ftrace bpf static_keys user_events uevent ring-buffer
+          - group: misc
+            targets: vDSO cachestat kmod locking verification
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison libelf-dev libssl-dev bc pahole \
+            qemu-system-x86 python3 python3-pip \
+            nftables iptables iproute2 iputils-ping \
+            ethtool socat netcat-openbsd \
+            libcap-dev libmnl-dev \
+            clang llvm
+          pip3 install virtme-ng
+
+      - name: Restore integration kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-x86_64-
+
+      - name: Build selftests
+        run: |
+          make -j$(nproc) -C tools/testing/selftests \
+            TARGETS="${{ matrix.targets }}" \
+            install INSTALL_PATH=$PWD/kselftest-install
+
+      - name: Run selftests in QEMU
+        timeout-minutes: 30
+        run: |
+          REPORT=selftest-${{ matrix.group }}-report.txt
+          INSTALL_DIR="$PWD/kselftest-install"
+          vng --run arch/x86/boot/bzImage \
+            --memory 4G \
+            --cpus $(nproc) \
+            --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            | tee "$REPORT"
+
+          if grep -qE "^not ok" "$REPORT"; then
+            echo "::error::Selftests failed in group ${{ matrix.group }}"
+            grep "^not ok" "$REPORT"
+            exit 1
+          fi
+          PASSED=$(grep -c "^ok " "$REPORT" || true)
+          echo "Group ${{ matrix.group }}: ${PASSED} tests passed"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ matrix.group }}-report
+          path: selftest-${{ matrix.group }}-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 7: Userspace Unit Tests（純 userspace，build + run，不需 kernel）
+  # ───────────────────────────────────────────────────────────────────────────
+  userspace-unit-tests:
+    name: Userspace Unit Tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: memblock
+            dir: tools/testing/memblock
+            bins: main
+          - suite: radix-tree
+            dir: tools/testing/radix-tree
+            bins: main idr-test xarray maple
+          - suite: rbtree
+            dir: tools/testing/rbtree
+            bins: rbtree_test interval_tree_test
+          - suite: scatterlist
+            dir: tools/testing/scatterlist
+            bins: main
+          - suite: vma
+            dir: tools/testing/vma
+            bins: vma
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc make libglib2.0-dev liburcu-dev
+
+      - name: Build ${{ matrix.suite }}
+        run: make -C ${{ matrix.dir }} -j$(nproc)
+
+      - name: Run ${{ matrix.suite }}
+        run: |
+          PASS=0; FAIL=0
+          for bin in ${{ matrix.bins }}; do
+            echo "--- $bin ---"
+            if ./${{ matrix.dir }}/$bin --verbose; then
+              PASS=$((PASS+1))
+            else
+              echo "::error::${{ matrix.suite }}/$bin failed"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "${{ matrix.suite }}: ${PASS} passed, ${FAIL} failed"
+          [ "$FAIL" -eq 0 ]
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 8: Coccinelle（semantic patch 靜態分析，只跑有變更的 .c 檔）
+  # ───────────────────────────────────────────────────────────────────────────
+  coccinelle:
+    name: Coccinelle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y coccinelle gcc make
+
+      - name: Determine changed .c files
+        id: files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="HEAD~1...HEAD"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+          FILES=$(git diff --name-only $RANGE -- '*.c' \
+            | grep -v '^tools/' | grep -v '^Documentation/' \
+            | tr '\n' ' ')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+
+      - name: Run Coccinelle
+        run: |
+          if [ -z "${{ steps.files.outputs.files }}" ]; then
+            echo "No .c files changed, skipping Coccinelle"
+            exit 0
+          fi
+          make coccicheck \
+            MODE=report \
+            COCCI_FILES="$(find scripts/coccinelle -name '*.cocci' | tr '\n' ' ')" \
+            J=$(nproc) \
+            ${{ steps.files.outputs.files }} \
+            2>&1 | tee coccinelle-report.txt || true
+
+          if grep -q "^-\|^+" coccinelle-report.txt 2>/dev/null; then
+            echo "::warning::Coccinelle found suggestions"
+            cat coccinelle-report.txt
+          fi
+
+      - name: Upload Coccinelle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coccinelle-report
+          path: coccinelle-report.txt
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage 9: KASAN Integration（用 KASAN kernel 跑 selftests，抓 memory bug）
+  # ───────────────────────────────────────────────────────────────────────────
+  build-kasan-kernel:
+    name: Build KASAN Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison \
+            libelf-dev libssl-dev \
+            bc pahole
+
+      - name: Cache KASAN kernel
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-x86_64-
+
+      - name: Build kernel with KASAN
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          make defconfig
+          readarray -t FRAGS < <(find tools/testing/selftests -maxdepth 2 -name config)
+          scripts/kconfig/merge_config.sh -m .config "${FRAGS[@]}"
+          ./scripts/config \
+            --enable KASAN \
+            --enable KASAN_GENERIC \
+            --enable KASAN_OUTLINE \
+            --enable KASAN_STACK \
+            --enable KASAN_VMALLOC
+          make olddefconfig
+          make -j$(nproc) bzImage modules
+          make INSTALL_MOD_PATH=modules_install modules_install
+
+  kasan-selftests:
+    name: KASAN Selftests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    needs: build-kasan-kernel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: mm
+            targets: mm cgroup memfd membarrier
+          - group: security
+            targets: landlock seccomp lsm capabilities
+          - group: net
+            targets: net tc-testing
+          - group: syscall
+            targets: signal clone3 exec pidfd ptrace
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc make flex bison libelf-dev libssl-dev bc pahole \
+            qemu-system-x86 python3 python3-pip \
+            nftables iptables iproute2 iputils-ping \
+            libcap-dev libmnl-dev
+          pip3 install virtme-ng
+
+      - name: Restore KASAN kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            .config
+            Module.symvers
+            include/config/
+            include/generated/
+            arch/x86/include/generated/
+            arch/x86/boot/bzImage
+            scripts/
+            modules_install/
+          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-x86_64-
+
+      - name: Build selftests
+        run: |
+          make -j$(nproc) -C tools/testing/selftests \
+            TARGETS="${{ matrix.targets }}" \
+            install INSTALL_PATH=$PWD/kselftest-install
+
+      - name: Run selftests under KASAN
+        timeout-minutes: 45
+        run: |
+          REPORT=kasan-selftest-${{ matrix.group }}-report.txt
+          INSTALL_DIR="$PWD/kselftest-install"
+          vng --run arch/x86/boot/bzImage \
+            --memory 4G \
+            --cpus $(nproc) \
+            --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
+            | tee "$REPORT"
+
+          if grep -qE "^not ok|KASAN:" "$REPORT"; then
+            echo "::error::KASAN issues or test failures in group ${{ matrix.group }}"
+            grep -E "^not ok|KASAN:" "$REPORT"
+            exit 1
+          fi
+          PASSED=$(grep -c "^ok " "$REPORT" || true)
+          echo "KASAN group ${{ matrix.group }}: ${PASSED} tests passed"
+
+      - name: Upload KASAN report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kasan-selftest-${{ matrix.group }}-report
+          path: kasan-selftest-${{ matrix.group }}-report.txt
