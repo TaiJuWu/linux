@@ -302,7 +302,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            gcc make flex bison \
+            gcc gcc-aarch64-linux-gnu make flex bison \
             libelf-dev libssl-dev \
             bc pahole
 
@@ -315,22 +315,22 @@ jobs:
             Module.symvers
             include/config/
             include/generated/
-            arch/x86/include/generated/
-            arch/x86/boot/bzImage
+            arch/arm64/include/generated/
+            arch/arm64/boot/Image
             scripts/
             modules_install/
-          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
-          restore-keys: integration-x86_64-
+          key: integration-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-arm64-
 
       - name: Merge all selftest configs and build
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          make defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
           readarray -t FRAGS < <(find tools/testing/selftests -maxdepth 2 -name config)
           scripts/kconfig/merge_config.sh -m .config "${FRAGS[@]}"
-          make olddefconfig
-          make -j$(nproc) bzImage modules
-          make INSTALL_MOD_PATH=modules_install modules_install
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=modules_install modules_install
 
   # ───────────────────────────────────────────────────────────────────────────
   # Stage 6b: Integration Selftests（QEMU via virtme-ng，分群平行跑）
@@ -372,8 +372,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            gcc make flex bison libelf-dev libssl-dev bc pahole \
-            qemu-system-x86 python3 python3-pip \
+            gcc gcc-aarch64-linux-gnu make flex bison libelf-dev libssl-dev bc pahole \
+            qemu-system-arm python3 python3-pip \
             nftables iptables iproute2 iputils-ping \
             ethtool socat netcat-openbsd \
             libcap-dev libmnl-dev \
@@ -388,16 +388,17 @@ jobs:
             Module.symvers
             include/config/
             include/generated/
-            arch/x86/include/generated/
-            arch/x86/boot/bzImage
+            arch/arm64/include/generated/
+            arch/arm64/boot/Image
             scripts/
             modules_install/
-          key: integration-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
-          restore-keys: integration-x86_64-
+          key: integration-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: integration-arm64-
 
       - name: Build selftests
         run: |
-          make -j$(nproc) -C tools/testing/selftests \
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) \
+            -C tools/testing/selftests \
             TARGETS="${{ matrix.targets }}" \
             install INSTALL_PATH=$PWD/kselftest-install
 
@@ -406,7 +407,8 @@ jobs:
         run: |
           REPORT=selftest-${{ matrix.group }}-report.txt
           INSTALL_DIR="$PWD/kselftest-install"
-          vng --run arch/x86/boot/bzImage \
+          vng --run arch/arm64/boot/Image \
+            --arch arm64 \
             --memory 4G \
             --cpus $(nproc) \
             --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
@@ -547,7 +549,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            gcc make flex bison \
+            gcc gcc-aarch64-linux-gnu make flex bison \
             libelf-dev libssl-dev \
             bc pahole
 
@@ -560,17 +562,17 @@ jobs:
             Module.symvers
             include/config/
             include/generated/
-            arch/x86/include/generated/
-            arch/x86/boot/bzImage
+            arch/arm64/include/generated/
+            arch/arm64/boot/Image
             scripts/
             modules_install/
-          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
-          restore-keys: kasan-x86_64-
+          key: kasan-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-arm64-
 
       - name: Build kernel with KASAN
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          make defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
           readarray -t FRAGS < <(find tools/testing/selftests -maxdepth 2 -name config)
           scripts/kconfig/merge_config.sh -m .config "${FRAGS[@]}"
           ./scripts/config \
@@ -579,9 +581,9 @@ jobs:
             --enable KASAN_OUTLINE \
             --enable KASAN_STACK \
             --enable KASAN_VMALLOC
-          make olddefconfig
-          make -j$(nproc) bzImage modules
-          make INSTALL_MOD_PATH=modules_install modules_install
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=modules_install modules_install
 
   kasan-selftests:
     name: KASAN Selftests (${{ matrix.group }})
@@ -606,8 +608,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            gcc make flex bison libelf-dev libssl-dev bc pahole \
-            qemu-system-x86 python3 python3-pip \
+            gcc gcc-aarch64-linux-gnu make flex bison libelf-dev libssl-dev bc pahole \
+            qemu-system-arm python3 python3-pip \
             nftables iptables iproute2 iputils-ping \
             libcap-dev libmnl-dev
           pip3 install virtme-ng
@@ -620,16 +622,17 @@ jobs:
             Module.symvers
             include/config/
             include/generated/
-            arch/x86/include/generated/
-            arch/x86/boot/bzImage
+            arch/arm64/include/generated/
+            arch/arm64/boot/Image
             scripts/
             modules_install/
-          key: kasan-x86_64-${{ hashFiles('Makefile', 'arch/x86/configs/x86_64_defconfig', 'tools/testing/selftests/**/config') }}
-          restore-keys: kasan-x86_64-
+          key: kasan-arm64-${{ hashFiles('Makefile', 'arch/arm64/configs/defconfig', 'tools/testing/selftests/**/config') }}
+          restore-keys: kasan-arm64-
 
       - name: Build selftests
         run: |
-          make -j$(nproc) -C tools/testing/selftests \
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) \
+            -C tools/testing/selftests \
             TARGETS="${{ matrix.targets }}" \
             install INSTALL_PATH=$PWD/kselftest-install
 
@@ -638,7 +641,8 @@ jobs:
         run: |
           REPORT=kasan-selftest-${{ matrix.group }}-report.txt
           INSTALL_DIR="$PWD/kselftest-install"
-          vng --run arch/x86/boot/bzImage \
+          vng --run arch/arm64/boot/Image \
+            --arch arm64 \
             --memory 4G \
             --cpus $(nproc) \
             --exec "cd $INSTALL_DIR && ./run_kselftest.sh 2>&1" \
