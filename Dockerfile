@@ -20,6 +20,11 @@ RUN apt-get update -qq && apt-get install -y \
     libcap-dev \
     libmnl-dev \
     liburcu-dev \
+    # LTP deps
+    autoconf automake libtool pkg-config \
+    libacl1-dev libaio-dev libnuma-dev \
+    libmount-dev libsctp-dev libtirpc-dev \
+    debootstrap e2fsprogs \
     clang llvm \
     # Network tools
     nftables iptables iproute2 iputils-ping \
@@ -32,7 +37,7 @@ RUN apt-get update -qq && apt-get install -y \
 # Install virtme-ng from source so the guest init binary is compiled
 # for the host architecture (aarch64), not the pre-built x86_64 binary
 # bundled in the PyPI wheel.
-RUN pip3 install --break-system-packages build && \
+RUN pip3 install --break-system-packages build kirk && \
     git clone https://github.com/arighi/virtme-ng.git /opt/virtme-ng && \
     cd /opt/virtme-ng && \
     pip3 install --break-system-packages -e .
